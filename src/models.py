@@ -19,6 +19,9 @@ class RankingEntry:
     content_ref: Optional[ContentRef] = None
     match_status: str = "unmatched"
     linked_artist_ids: tuple[str, ...] = ()
+    # global only
+    hours_viewed: int = 0
+    views: int = 0
 
 
 @dataclass(frozen=True)
