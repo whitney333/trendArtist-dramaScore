@@ -30,6 +30,7 @@ from src.models import CountryRanking, RankingEntry
 logger = logging.getLogger(__name__)
 
 TSV_URL = "https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv"
+GLOBAL_TSV_URL = "https://www.netflix.com/tudum/top10/data/all-weeks-global.tsv"
 
 CATEGORY_MAP = {
     "Films": "films",
@@ -48,10 +49,124 @@ def _country_slug(name: str) -> str:
     return name.lower().replace(" ", "-")
 
 
+def fetch_global_tsv(session: requests.Session) -> str:
+    resp = session.get(GLOBAL_TSV_URL, timeout=30)
+    resp.raise_for_status()
+    return resp.text
+
+
 def fetch_tsv(session: requests.Session) -> str:
     resp = session.get(TSV_URL, timeout=30)
     resp.raise_for_status()
     return resp.text
+
+
+def parse_global_tsv(tsv_text: str, target_week=None, include_all_weeks=False):
+
+    reader = csv.DictReader(
+        StringIO(tsv_text),
+        delimiter="\t"
+    )
+
+    grouped = defaultdict(list)
+    latest_week = ""
+
+    for row in reader:
+
+        week = row["week"]
+
+        if week > latest_week:
+            latest_week = week
+
+        if target_week and week != target_week:
+            continue
+
+        # ==================================================
+        # ONLY NON-ENGLISH CHARTS
+        # ==================================================
+        category_raw = str(
+            row.get("category", "")
+        ).strip()
+
+        if "Non-English" not in category_raw:
+            continue
+
+        key = (week, category_raw)
+
+        grouped[key].append(row)
+
+    # latest only
+    if target_week is None and not include_all_weeks:
+
+        grouped = {
+            k: v for k, v in grouped.items()
+            if k[0] == latest_week
+        }
+
+    results = []
+
+    for (week, category), rows in grouped.items():
+
+        entries = tuple(
+
+            RankingEntry(
+                rank=_parse_int(r["weekly_rank"]),
+                title=r["show_title"],
+                weeks_in_top_10=_parse_int(
+                    r.get(
+                        "cumulative_weeks_in_top_10",
+                        0
+                    )
+                ),
+
+                # GLOBAL ONLY
+                hours_viewed=_parse_int(
+                    r.get(
+                        "weekly_hours_viewed",
+                        0
+                    )
+                ),
+                views=_parse_int(
+                    r.get(
+                        "weekly_views",
+                        0
+                    )
+                ),
+            )
+
+            for r in sorted(
+                rows,
+                key=lambda x: _parse_int(x["weekly_rank"])
+            )
+        )
+
+        # ==========================================
+        # normalize category
+        # ==========================================
+        if "TV" in category:
+            normalized_category = "tv"
+        else:
+            normalized_category = "films"
+
+        results.append(
+
+            CountryRanking(
+                week=week,
+
+                country="GLOBAL",
+                country_name="GLOBAL",
+
+                category=normalized_category,
+
+                source="global_non_english_tsv",
+
+                fetched_at=datetime.now(UTC),
+
+                rankings=entries,
+            )
+        )
+
+    return tuple(results)
 
 
 def parse_tsv(tsv_text: str, target_week=None, include_all_weeks=False):
@@ -113,18 +228,61 @@ def parse_tsv(tsv_text: str, target_week=None, include_all_weeks=False):
     return tuple(results)
 
 
-def fetch_latest_week(session):
-    return parse_tsv(fetch_tsv(session))
+def fetch_latest_week(session: requests.Session):
+
+    country_rankings = parse_tsv(fetch_tsv(session))
+    global_rankings = parse_global_tsv(fetch_global_tsv(session))
+
+    return country_rankings + global_rankings
 
 
-def fetch_specific_week(session, week: str):
-    return parse_tsv(fetch_tsv(session), target_week=week)
+def fetch_specific_week(session: requests.Session, week: str):
+
+    country = parse_tsv(fetch_tsv(session), target_week=week)
+    global_ = parse_global_tsv(fetch_global_tsv(session), target_week=week)
+
+    return country + global_
 
 
 def fetch_recent_weeks(session, weeks: int):
-    all_data = parse_tsv(fetch_tsv(session), include_all_weeks=True)
+
+    country = parse_tsv(fetch_tsv(session), include_all_weeks=True)
+    global_ = parse_global_tsv(fetch_global_tsv(session), include_all_weeks=True)
+
+    all_data = country + global_
 
     weeks_sorted = sorted({x.week for x in all_data}, reverse=True)
     selected = set(weeks_sorted[:weeks])
 
     return tuple(x for x in all_data if x.week in selected)
+
+
+def fetch_latest_global_week(session):
+    return parse_global_tsv(fetch_global_tsv(session))
+
+
+def fetch_specific_global_week(session, week: str):
+    return parse_global_tsv(
+        fetch_global_tsv(session),
+        target_week=week
+    )
+
+
+def fetch_recent_global_weeks(session, weeks: int):
+
+    all_data = parse_global_tsv(
+        fetch_global_tsv(session),
+        include_all_weeks=True
+    )
+
+    weeks_sorted = sorted(
+        {x.week for x in all_data},
+        reverse=True
+    )
+
+    selected = set(weeks_sorted[:weeks])
+
+    return tuple(
+        x for x in all_data
+        if x.week in selected
+    )
